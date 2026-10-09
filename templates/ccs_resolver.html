@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ tdoc.title }} - 滚榜</title>
+{% raw %}
+<style>
+  :root {
+    --bg: #0f1218;
+    --row: #171b23;
+    --row-alt: #1b2029;
+    --line: #262c37;
+    --text: #e8ebf0;
+    --muted: #8a93a3;
+    --accent: #f5c242;
+    --full: #2e9d5b;
+    --partial: #c98a1c;
+    --zero: #b23b3b;
+    --pending: #3a64c8;
+    --row-h: 56px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { position: sticky; top: 0; z-index: 10; background: var(--bg); border-bottom: 1px solid var(--line); }
+  .bar { display: flex; align-items: baseline; gap: 16px; padding: 14px 20px 10px; flex-wrap: wrap; }
+  .bar h1 { margin: 0; font-size: 22px; font-weight: 600; }
+  .bar .info { color: var(--muted); font-size: 14px; }
+  .bar .progress { margin-left: auto; color: var(--accent); font-size: 14px; font-variant-numeric: tabular-nums; }
+  .notice { margin: 0 20px 10px; padding: 8px 12px; border-radius: 6px; background: #3a2a10; color: #f5d08a; font-size: 14px; }
+  .notice:empty { display: none; }
+  .grid { display: grid; align-items: center; column-gap: 6px; padding: 0 20px; }
+  .head { height: 40px; color: var(--muted); font-size: 13px; }
+  .head .p { text-align: center; font-weight: 600; color: var(--text); }
+  #board { position: relative; }
+  .row {
+    position: absolute; left: 0; right: 0; height: var(--row-h);
+    transition: transform .8s cubic-bezier(.4, 0, .2, 1), background-color .3s;
+    border-bottom: 1px solid var(--line);
+  }
+  .row.odd { background: var(--row-alt); }
+  .row.even { background: var(--row); }
+  .row.current { background: #2b3550; box-shadow: inset 4px 0 0 var(--accent); z-index: 2; }
+  .rank { text-align: center; font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .team { overflow: hidden; }
+  .team .name { font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .team .school { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .score { text-align: right; font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; padding-right: 8px; }
+  .cell {
+    height: 42px; border-radius: 4px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    font-variant-numeric: tabular-nums; line-height: 1.1;
+  }
+  .cell .v { font-size: 15px; font-weight: 600; }
+  .cell .t { font-size: 11px; opacity: .85; }
+  .cell.full { background: var(--full); }
+  .cell.partial { background: var(--partial); }
+  .cell.zero { background: var(--zero); }
+  .cell.pending { background: var(--pending); }
+  .cell.revealing { animation: blink .4s ease-in-out infinite alternate; outline: 2px solid var(--accent); }
+  .cell.flash { animation: pop .6s ease-out; }
+  @keyframes blink { from { opacity: 1; } to { opacity: .35; } }
+  @keyframes pop { 0% { transform: scale(1.35); } 100% { transform: scale(1); } }
+  #help {
+    position: fixed; right: 16px; bottom: 16px; z-index: 20; background: rgba(23, 27, 35, .95); border: 1px solid var(--line);
+    border-radius: 8px; padding: 12px 16px; font-size: 13px; color: var(--muted); line-height: 1.8;
+  }
+  #help > div { display: grid; grid-template-columns: 150px auto; }
+  #help b { color: var(--text); font-weight: 600; }
+  #help.hidden { display: none; }
+  #loading { padding: 40px 20px; color: var(--muted); }
+</style>
+{% endraw %}
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1 id="title"></h1>
+    <span class="info" id="info"></span>
+    <span class="progress" id="progress"></span>
+  </div>
+  <div class="notice" id="notice"></div>
+  <div class="grid head" id="head"></div>
+</header>
+<div id="loading">加载中...</div>
+<div id="board"></div>
+<div id="help">
+  <div><b>空格 / → / Enter</b>揭晓下一项</div>
+  <div><b>Backspace / ←</b>撤销上一步</div>
+  <div><b>A</b>自动播放 开/关</div>
+  <div><b>End</b>全部揭晓</div>
+  <div><b>F</b>全屏</div>
+  <div><b>H</b>显示/隐藏帮助</div>
+</div>
+{% raw %}
+<script>
+(function () {
+  const REVEAL_BLINK = 900;
+  const AFTER_REVEAL = 500;
+  const MOVE = 850;
+  const AUTO_DELAY = 1200;
+
+  let data;
+  let teams = [];
+  let order = [];
+  const history = [];
+  let currentId = null;
+  let busy = false;
+  let autoplay = false;
+  let rowH = 56;
+
+  const $ = (id) => document.getElementById(id);
+  const fmt = (v) => `${Math.round(v * 100) / 100}`;
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // 与 Hydro ledo 赛制 stat 保持一致：
+  // 第 n 次有效提交得分 = round(max(0.7, 0.95^(n-1)) * score)，取最高者；CE / FE 不计次数也不得分
+  function cellResult(subs) {
+    let ntry = 0;
+    let best = null;
+    for (const s of subs) {
+      if (s.valid) ntry++;
+      const ps = s.valid ? Math.round(Math.max(0.7, 0.95 ** (ntry - 1)) * s.score) : 0;
+      if (!best || best.ps < ps) best = { ps, score: s.score, ntry: Math.max(0, ntry - 1), accepted: s.accepted };
+    }
+    return best;
+  }
+
+  function teamScore(team) {
+    let score = 0;
+    for (const p of data.problems) {
+      const r = cellResult(team.cells[p.id].known);
+      if (r) score += r.ps * p.rate;
+    }
+    return score;
+  }
+
+  function hasPending(team) {
+    return data.problems.some((p) => team.cells[p.id].hidden.length);
+  }
+
+  function sortTeams() {
+    for (const t of teams) t.score = teamScore(t);
+    order = [...teams].sort((a, b) => (b.score - a.score) || (a.id - b.id));
+    let count = 0;
+    let last = null;
+    let rank = 0;
+    for (const t of order) {
+      if (t.unrank) { t.rank = '⭐'; continue; }
+      count++;
+      if (last === null || Math.abs(last - t.score) > 1e-9) rank = count;
+      last = t.score;
+      t.rank = rank;
+    }
+  }
+
+  function findCurrent() {
+    for (let i = order.length - 1; i >= 0; i--) if (hasPending(order[i])) return order[i];
+    return null;
+  }
+
+  function init(d) {
+    data = d;
+    const byId = {};
+    teams = d.teams.map((t) => {
+      const cells = {};
+      for (const p of d.problems) cells[p.id] = { known: [], hidden: [] };
+      byId[t.id] = { ...t, cells };
+      return byId[t.id];
+    });
+    for (const s of d.submissions) {
+      const team = byId[s.team];
+      if (!team || !team.cells[s.pid]) continue;
+      // 与 Hydro 一致：提交时间晚于封榜时间的为封榜提交
+      const frozen = d.lockAt !== null && s.time > d.lockAt;
+      team.cells[s.pid][frozen ? 'hidden' : 'known'].push(s);
+    }
+    const cols = `64px minmax(180px, 1fr) 100px repeat(${d.problems.length}, minmax(52px, 72px))`;
+    $('head').style.gridTemplateColumns = cols;
+    $('head').innerHTML = '';
+    for (const text of ['#', '队伍', '总分']) {
+      const el = document.createElement('div');
+      el.textContent = text;
+      if (text === '总分') el.style.textAlign = 'right';
+      if (text === '#') el.style.textAlign = 'center';
+      $('head').appendChild(el);
+    }
+    for (const p of d.problems) {
+      const el = document.createElement('div');
+      el.className = 'p';
+      el.textContent = p.label;
+      el.title = p.title;
+      $('head').appendChild(el);
+    }
+    $('title').textContent = d.title;
+    const time = (ms) => new Date(ms).toLocaleString('zh-CN', { hour12: false });
+    $('info').textContent = d.lockAt ? `封榜时间 ${time(d.lockAt)}` : '';
+    const notices = [];
+    if (!d.lockAt) notices.push('比赛未设置封榜时间，没有需要揭晓的提交。');
+    if (Date.now() < d.endAt) notices.push('比赛尚未结束，滚榜数据不是最终结果。');
+    $('notice').textContent = notices.join(' ');
+
+    const board = $('board');
+    board.innerHTML = '';
+    rowH = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--row-h'), 10) || 56;
+    board.style.height = `${teams.length * rowH}px`;
+    for (const t of teams) {
+      const row = document.createElement('div');
+      row.className = 'row grid';
+      row.style.gridTemplateColumns = cols;
+      row.innerHTML = '<div class="rank"></div><div class="team"><div class="name"></div><div class="school"></div></div><div class="score"></div>';
+      row.querySelector('.name').textContent = t.name;
+      row.querySelector('.school').textContent = t.school;
+      t.cellEls = {};
+      for (const p of d.problems) {
+        const c = document.createElement('div');
+        c.className = 'cell';
+        row.appendChild(c);
+        t.cellEls[p.id] = c;
+      }
+      t.row = row;
+      board.appendChild(row);
+    }
+    $('loading').remove();
+    setTimeout(() => $('help').classList.add('hidden'), 8000);
+    sortTeams();
+    render();
+    select();
+  }
+
+  function renderCell(team, p) {
+    const el = team.cellEls[p.id];
+    const cell = team.cells[p.id];
+    const r = cellResult(cell.known);
+    el.classList.remove('full', 'partial', 'zero', 'pending');
+    el.innerHTML = '';
+    const v = document.createElement('div');
+    v.className = 'v';
+    const t = document.createElement('div');
+    t.className = 't';
+    if (cell.hidden.length) {
+      el.classList.add('pending');
+      v.textContent = r ? fmt(r.ps * p.rate) : '?';
+      t.textContent = `+${cell.hidden.length}`;
+    } else if (r) {
+      el.classList.add(r.ps > 0 ? (r.accepted ? 'full' : 'partial') : 'zero');
+      v.textContent = fmt(r.ps * p.rate);
+      if (r.ntry) t.textContent = `-${r.ntry}`;
+    } else {
+      return;
+    }
+    el.appendChild(v);
+    el.appendChild(t);
+  }
+
+  function render() {
+    order.forEach((t, i) => {
+      t.row.style.transform = `translateY(${i * rowH}px)`;
+      t.row.classList.toggle('odd', i % 2 === 1);
+      t.row.classList.toggle('even', i % 2 === 0);
+      t.row.classList.toggle('current', t.id === currentId);
+      t.row.querySelector('.rank').textContent = t.rank;
+      t.row.querySelector('.score').textContent = fmt(t.score);
+      for (const p of data.problems) renderCell(t, p);
+    });
+    let pending = 0;
+    for (const t of teams) for (const p of data.problems) if (t.cells[p.id].hidden.length) pending++;
+    $('progress').textContent = pending
+      ? `待揭晓 ${pending} 项${autoplay ? ' · 自动播放中' : ''}`
+      : (data.lockAt ? '已全部揭晓' : '');
+  }
+
+  function select() {
+    const cur = findCurrent();
+    currentId = cur ? cur.id : null;
+    render();
+    if (!cur) return;
+    const idx = order.indexOf(cur);
+    const boardTop = $('board').getBoundingClientRect().top + window.scrollY;
+    const top = boardTop + idx * rowH - window.innerHeight * 0.55;
+    window.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+  }
+
+  function revealCell(team, p) {
+    const cell = team.cells[p.id];
+    history.push({ team, pid: p.id, subs: cell.hidden });
+    cell.known = cell.known.concat(cell.hidden).sort((a, b) => a.time - b.time);
+    cell.hidden = [];
+  }
+
+  async function step() {
+    if (busy) return;
+    const team = findCurrent();
+    if (!team) { autoplay = false; render(); return; }
+    busy = true;
+    try {
+      if (team.id !== currentId) {
+        select();
+        await sleep(400);
+      }
+      const p = data.problems.find((i) => team.cells[i.id].hidden.length);
+      const el = team.cellEls[p.id];
+      el.classList.add('revealing');
+      await sleep(REVEAL_BLINK);
+      el.classList.remove('revealing');
+      revealCell(team, p);
+      renderCell(team, p);
+      el.classList.add('flash');
+      team.row.querySelector('.score').textContent = fmt(teamScore(team));
+      await sleep(AFTER_REVEAL);
+      el.classList.remove('flash');
+      const before = order.indexOf(team);
+      sortTeams();
+      render();
+      if (order.indexOf(team) !== before) await sleep(MOVE);
+      select();
+    } finally {
+      busy = false;
+    }
+    if (autoplay) setTimeout(() => { if (autoplay) step(); }, AUTO_DELAY);
+  }
+
+  function undo() {
+    if (busy || !history.length) return;
+    const { team, pid, subs } = history.pop();
+    const cell = team.cells[pid];
+    const ids = new Set(subs);
+    cell.known = cell.known.filter((s) => !ids.has(s));
+    cell.hidden = subs;
+    sortTeams();
+    select();
+  }
+
+  function revealAll() {
+    if (busy) return;
+    autoplay = false;
+    let team;
+    while ((team = findCurrent())) {
+      for (const p of data.problems) if (team.cells[p.id].hidden.length) revealCell(team, p);
+      sortTeams();
+    }
+    select();
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (!data || e.metaKey || e.ctrlKey || e.altKey) return;
+    switch (e.key) {
+      case ' ':
+      case 'Enter':
+      case 'ArrowRight':
+        e.preventDefault();
+        step();
+        break;
+      case 'Backspace':
+      case 'ArrowLeft':
+        e.preventDefault();
+        undo();
+        break;
+      case 'a':
+      case 'A':
+        autoplay = !autoplay;
+        render();
+        if (autoplay) step();
+        break;
+      case 'End':
+        e.preventDefault();
+        revealAll();
+        break;
+      case 'f':
+      case 'F':
+        if (document.fullscreenElement) document.exitFullscreen();
+        else document.documentElement.requestFullscreen();
+        break;
+      case 'h':
+      case 'H':
+        $('help').classList.toggle('hidden');
+        break;
+      default:
+    }
+  });
+
+  fetch(`${location.pathname}?json=true`, { headers: { accept: 'application/json' }, credentials: 'same-origin' })
+    .then((res) => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    })
+    .then(init)
+    .catch((err) => {
+      $('loading').textContent = `加载滚榜数据失败：${err.message}`;
+    });
+}());
+</script>
+{% endraw %}
+</body>
+</html>

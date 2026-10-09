@@ -1,6 +1,8 @@
 import { Context, Schema } from 'hydrooj';
 import * as handler from './handler';
 import { CCSEventFeedService } from './lib/event-mgr';
+import { applyLedoFreeze } from './lib/ledo';
+import { registerResolverView } from './lib/resolver';
 import { CCSEventContest, CCSEventDoc } from './lib/types';
 
 declare module 'hydrooj' {
@@ -17,10 +19,13 @@ export const name = 'ccs-api';
 export const Config = Schema.object({
     username: Schema.string().default('ccs_hydro').description('CCS Username'),
     password: Schema.string().default('defaultKey@ccs').description('CCS Password'),
+    ledoFreeze: Schema.boolean().default(true).description('Enable scoreboard freeze (lockAt) for Ledo contests'),
 }).description('CCS API');
 
-export async function apply(ctx: Context) {
+export async function apply(ctx: Context, config: ReturnType<typeof Config>) {
     ctx.plugin(CCSEventFeedService);
+    if (config.ledoFreeze) applyLedoFreeze(ctx);
+    registerResolverView(ctx);
     ctx.inject(['ccs'], async (c: Context) => {
         c.server.config.enableSSE = true;
         c.Route('ccs_operation', '/ccs/api/contests/:contestId/operation/:operation', handler.CCSOperationHandler);
