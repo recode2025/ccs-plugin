@@ -1,15 +1,51 @@
 import crypto from 'crypto';
 import {
     ContestModel, ProblemConfig, ProblemDict, ProblemModel,
-    RecordDoc, STATUS_SHORT_TEXTS, Tdoc, TestCase, User,
+    RecordDoc, STATUS, STATUS_SHORT_TEXTS, STATUS_TEXTS, Tdoc, TestCase, User,
 } from 'hydrooj';
 import {
-    CCSContest, CCSJudgement, CCSOrganization,
+    CCSContest, CCSJudgement, CCSJudgementType, CCSOrganization,
     CCSProblem, CCSRun, CCState, CCSTeam, CCSubmission,
 } from './types';
 import { TimeUtils } from './utils';
 
+// ICPC Tools 的分数赛只对 solved=true 的判题结果计分，Ledo 的部分分提交使用该类型
+export const PARTIAL_JUDGEMENT_TYPE: CCSJudgementType = {
+    id: 'PA', name: 'Partially Accepted', penalty: false, solved: true,
+};
+
+export function isLedo(tdoc: Tdoc) {
+    return tdoc.rule === 'ledo';
+}
+
+// Ledo 赛制中 CE / FE 不计入尝试次数
+export function isLedoValidTry(status: number) {
+    return ![STATUS.STATUS_COMPILE_ERROR, STATUS.STATUS_FORMAT_ERROR].includes(status);
+}
+
+// 按提交顺序统计每个队伍每道题的有效尝试次数（含当前提交）
+export function createLedoTryCounter() {
+    const counter: Record<string, number> = {};
+    return (rdoc: RecordDoc) => {
+        const key = `${rdoc.uid}/${rdoc.pid}`;
+        if (isLedoValidTry(rdoc.status)) counter[key] = (counter[key] || 0) + 1;
+        return counter[key] || 0;
+    };
+}
+
 export class CCSAdapter {
+    public getJudgementTypes(): CCSJudgementType[] {
+        return [
+            ...Object.keys(STATUS_SHORT_TEXTS).map((i) => ({
+                id: STATUS_SHORT_TEXTS[i],
+                name: STATUS_TEXTS[i],
+                penalty: ![STATUS.STATUS_ACCEPTED, STATUS.STATUS_COMPILE_ERROR, STATUS.STATUS_SYSTEM_ERROR].includes(+i),
+                solved: +i === STATUS.STATUS_ACCEPTED,
+            })),
+            PARTIAL_JUDGEMENT_TYPE,
+        ];
+    }
+
     public toContest(tdoc: Tdoc): CCSContest {
         return {
             id: tdoc.docId.toHexString(),
@@ -17,11 +53,11 @@ export class CCSAdapter {
             formal_name: tdoc.title,
             start_time: TimeUtils.formatTime(tdoc.beginAt),
             duration: TimeUtils.formatDuration(tdoc.endAt.getTime() - tdoc.beginAt.getTime()),
-            scoreboard_type: 'pass-fail',
+            scoreboard_type: isLedo(tdoc) ? 'score' : 'pass-fail',
             scoreboard_freeze_duration: tdoc.lockAt
                 ? TimeUtils.formatDuration(tdoc.endAt.getTime() - tdoc.lockAt.getTime())
                 : null,
-            penalty_time: 20,
+            penalty_time: isLedo(tdoc) ? 0 : 20,
         };
     }
 
@@ -57,6 +93,7 @@ export class CCSAdapter {
             rgb: (typeof (tdoc.balloon?.[pid]) === 'object' ? tdoc.balloon[pid].color : null) || '#ffffff',
             time_limit: (((referenceData ? referenceData.config : pdict[pid].config) as ProblemConfig).timeMax) / 1000,
             test_data_count: (((referenceData ? referenceData.config : pdict[pid].config) as ProblemConfig).count),
+            ...(isLedo(tdoc) ? { max_score: tdoc.score?.[pid] || 100 } : {}),
         };
     }
 
@@ -92,11 +129,26 @@ export class CCSAdapter {
         };
     }
 
-    public toJudgement(tdoc: Tdoc, rdoc: RecordDoc): CCSJudgement {
+    /**
+     * @param ntry Ledo 赛制下该提交是此队伍此题的第几次有效尝试（含本次）
+     */
+    public toJudgement(tdoc: Tdoc, rdoc: RecordDoc, ntry = 1): CCSJudgement {
+        let judgementTypeId = rdoc.judgeAt ? STATUS_SHORT_TEXTS[rdoc.status] : null;
+        let score: number | undefined;
+        if (isLedo(tdoc)) {
+            // 与 Hydro Ledo 赛制一致：round(max(0.7, 0.95^(n-1)) * 原始分) * 题目分值比例
+            // ICPC Tools 每题取 solved 判题中的最高分，即为 Hydro 中的每题得分
+            const rate = (tdoc.score?.[rdoc.pid] || 100) / 100;
+            score = (rdoc.judgeAt && isLedoValidTry(rdoc.status))
+                ? Math.round(Math.max(0.7, 0.95 ** (ntry - 1)) * (rdoc.score || 0)) * rate
+                : 0;
+            if (score > 0 && rdoc.status !== STATUS.STATUS_ACCEPTED) judgementTypeId = PARTIAL_JUDGEMENT_TYPE.id;
+        }
         return {
             id: `j-${rdoc._id.toHexString()}`,
             submission_id: rdoc._id.toHexString(),
-            judgement_type_id: rdoc.judgeAt ? STATUS_SHORT_TEXTS[rdoc.status] : null,
+            judgement_type_id: judgementTypeId,
+            ...(score !== undefined ? { score } : {}),
             start_time: TimeUtils.formatTime(rdoc._id.getTimestamp()),
             start_contest_time: TimeUtils.getContestTime(tdoc, rdoc._id.getTimestamp()),
             end_time: rdoc.judgeAt ? TimeUtils.formatTime(rdoc.judgeAt) : null,

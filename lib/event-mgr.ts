@@ -3,9 +3,9 @@ import crypto from 'crypto';
 import { Collection } from 'mongodb';
 import {
     ContestModel, Context, ForbiddenError, ObjectId, ProblemModel, RecordDoc, RecordModel, Service,
-    STATUS, STATUS_SHORT_TEXTS, STATUS_TEXTS, Tdoc, UserModel,
+    STATUS, Tdoc, UserModel,
 } from 'hydrooj';
-import { CCSAdapter } from './adapter';
+import { CCSAdapter, createLedoTryCounter, isLedo } from './adapter';
 import { CCSEventContest, CCSEventDoc, CCState, EventType } from './types';
 
 export class CCSEventFeedService extends Service {
@@ -77,6 +77,18 @@ export class CCSEventFeedService extends Service {
         }
     }
 
+    // 统计该提交是此队伍此题的第几次有效尝试（含本次）。仍在评测中的更早提交按有效计入，与其最终结果一致
+    async countLedoTries(tdoc: Tdoc, rdoc: RecordDoc) {
+        return RecordModel.coll.countDocuments({
+            domainId: tdoc.domainId,
+            contest: tdoc._id,
+            uid: rdoc.uid,
+            pid: rdoc.pid,
+            _id: { $lte: rdoc._id },
+            status: { $nin: [STATUS.STATUS_COMPILE_ERROR, STATUS.STATUS_FORMAT_ERROR] },
+        });
+    }
+
     async handleRecordChange(rdoc: RecordDoc, $set?: any, $push?: any) {
         if (!rdoc.contest || rdoc.contest.toHexString().startsWith('0'.repeat(23))) return;
         const tdoc = await ContestModel.get(rdoc.domainId, rdoc.contest);
@@ -86,7 +98,8 @@ export class CCSEventFeedService extends Service {
             await this.addEvent(tdoc._id, 'submissions', this.adapter.toSubmission(tdoc, rdoc));
             await this.addEvent(tdoc._id, 'judgements', this.adapter.toJudgement(tdoc, rdoc));
         } else if (rdoc.judgeAt) {
-            await this.addEvent(tdoc._id, 'judgements', this.adapter.toJudgement(tdoc, rdoc));
+            const ntry = isLedo(tdoc) ? await this.countLedoTries(tdoc, rdoc) : 1;
+            await this.addEvent(tdoc._id, 'judgements', this.adapter.toJudgement(tdoc, rdoc, ntry));
         } else if ($push.testCases) {
             await this.addEvent(tdoc._id, 'runs', this.adapter.toRun(tdoc, rdoc, $push.testCases));
         }
@@ -145,21 +158,16 @@ export class CCSEventFeedService extends Service {
         }
 
         // judgement-types
-        const judgementTypes = Object.keys(STATUS_SHORT_TEXTS);
-        for (const i of judgementTypes) {
-            await this.addEvent(tdoc._id, 'judgement-types', {
-                id: STATUS_SHORT_TEXTS[i],
-                name: STATUS_TEXTS[i],
-                penalty: ![STATUS.STATUS_ACCEPTED, STATUS.STATUS_COMPILE_ERROR, STATUS.STATUS_SYSTEM_ERROR].includes(+i),
-                solved: +i === STATUS.STATUS_ACCEPTED,
-            });
+        for (const judgementType of this.adapter.getJudgementTypes()) {
+            await this.addEvent(tdoc._id, 'judgement-types', judgementType);
         }
 
         // submissions & judgements
         const records = await RecordModel.getMulti(tdoc.domainId, { contest: tdoc._id }).sort({ _id: 1 }).toArray();
+        const countTry = createLedoTryCounter();
         for (const rdoc of records) {
             await this.addEvent(tdoc._id, 'submissions', this.adapter.toSubmission(tdoc, rdoc));
-            await this.addEvent(tdoc._id, 'judgements', this.adapter.toJudgement(tdoc, rdoc));
+            await this.addEvent(tdoc._id, 'judgements', this.adapter.toJudgement(tdoc, rdoc, countTry(rdoc)));
             for (const testCase of rdoc.testCases) {
                 await this.addEvent(tdoc._id, 'runs', this.adapter.toRun(tdoc, rdoc, testCase));
             }

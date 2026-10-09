@@ -59,6 +59,7 @@ export interface CCSProblem {
     rgb: string;
     time_limit: number;
     test_data_count: number;
+    max_score?: number;
 }
 
 export interface CCSGroup {
@@ -101,6 +102,7 @@ export interface CCSJudgement {
     id: string;
     submission_id: string;
     judgement_type_id: string;
+    score?: number;
     start_time: string;
     start_contest_time: string;
     end_time: string;

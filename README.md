@@ -87,6 +87,20 @@ pm2 restart hydrooj
 
 ![](./images/reset-contest.png)
 
+## Ledo（乐多赛）接入 ICPC Tools
+
+除 ACM/ICPC 赛制外，CCS API 也支持 Ledo 赛制，可以沿用 CCS → CDS → Presentation Client / Resolver 的流程投屏和滚榜。操作步骤与 ACM 比赛相同（“(CCS) 初始化比赛”按钮在 Ledo 比赛中同样可用），插件会自动按分数赛输出数据：
+
+- `contest.scoreboard_type` 为 `score`，`problems.max_score` 为题目分值（默认 100）
+- 每条 `judgement` 带 `score`，即该次提交按 Ledo 规则衰减后的得分：`round(max(0.7, 0.95^(n-1)) * 原始分) * 题目分值比例`
+- ICPC Tools 在分数赛中只对 `solved=true` 的判题结果计分，因此有部分分的非 AC 提交，判题类型会标记为 `PA`（Partially Accepted，`solved=true`）
+- ICPC Tools 每题取最高分，与 Hydro 的 Ledo 计分结果一致
+
+> [!NOTE]
+> - 比赛中实时投屏：未封榜时 Presentation Client 会实时重排；封榜后新提交显示为待定，需要在比赛中设置“封榜时间”。
+> - 排名并列时，ICPC Tools 会按“最后一次提分时间”早者在前排序，而 Hydro 的 Ledo 榜单将同分队伍视为并列。
+> - 在更新本插件前已初始化的 Ledo 比赛，需要先“(CCS) 重置比赛”再“(CCS) 初始化比赛”，并重置 CDS 的 Event-Feed 缓存。
+
 ## Ledo（乐多赛）滚榜
 
 插件为 Ledo 赛制提供了内置滚榜页面，不依赖 ICPC Tools，计分规则与 Hydro 的 Ledo 赛制完全一致（第 n 次有效提交得分乘以 `max(0.7, 0.95^(n-1))`，每题取最高，CE / FE 不计次数）。
